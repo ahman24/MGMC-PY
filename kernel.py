@@ -15,61 +15,114 @@ from numpy import ndarray
 # CONSTANS
 # =============================================================================
 PI_DOUBLE = nb.float64(2.0*math.pi)
-IDX_FISS_BANK = 0
 
 SRC_BANK = np.zeros(N_PARTICLE, dtype=PARTICLE_TYPE)
 FISS_BANK = np.zeros(3*N_PARTICLE, dtype=PARTICLE_TYPE)
+
 
 # =============================================================================
 # SIMULATION
 # =============================================================================
 
 
-KEFF_CURRENT = nb.float64(1.0)
-KEFF_SUM = nb.float64(0.0)
-KEFF_SUMSQ = nb.float64(0.0)
-
-
-# cant be jitted because accessing global vars
 @njit
-def generation_closeout(idx_gen: int, KEFF_TL_SUM: float) -> None:
+def generation_closeout(idx_gen: int, ESTIMATOR: ndarray) -> list[float]:
 
     # Update current generation keff
-    KEFF_CURRENT = KEFF_TL_SUM / N_PARTICLE
+    ESTIMATOR['KEFF_CURRENT'] = ESTIMATOR['KEFF_TL_SUM'] / N_PARTICLE
+
+    # Calc SE
+
+    # Perform UFS
 
     # Synchronize particle banks
-    sync_bank()
+    global SRC_BANK
+    sync_bank(SRC_BANK, ESTIMATOR)
 
-    # Calculate average keff
+    # Reset keff-generation accumulator
+    ESTIMATOR['KEFF_TL_SUM'] = 0.0
+
+    # Inactive generation: Report current generation keff
     CURRENT_GEN = idx_gen + 1
     IS_INACTIVE = CURRENT_GEN <= N_INACTIVE
     if IS_INACTIVE:
-        print(round(KEFF_CURRENT, 5))
-        return
+        return ESTIMATOR['KEFF_CURRENT'], 0.0
 
     # Active cycle: Accumulate keff and print std
-    global KEFF_SUM, KEFF_SUMSQ
-    KEFF_SUM += KEFF_CURRENT
-    KEFF_SUMSQ += KEFF_CURRENT**2
+    ESTIMATOR['KEFF_SUM'] += ESTIMATOR['KEFF_CURRENT']
+    ESTIMATOR['KEFF_SUMSQ'] += ESTIMATOR['KEFF_CURRENT']**2
 
     # Calculate current average and absolute std
     N_ACTIVE = CURRENT_GEN - N_INACTIVE
-    KEFF_AVG = KEFF_SUM / N_ACTIVE
+    KEFF_AVG = ESTIMATOR['KEFF_SUM'] / N_ACTIVE
     KEFF_ABS_STD = 1.0 / \
         math.sqrt(N_ACTIVE) * \
-        math.sqrt(KEFF_SUMSQ/N_ACTIVE - KEFF_AVG**2)
-    print(str(round(KEFF_AVG, 5)) + " +/- " + str(round(KEFF_ABS_STD, 5)))
+        math.sqrt(ESTIMATOR['KEFF_SUMSQ']/N_ACTIVE - KEFF_AVG**2)
+
+    # Report average keff
+    return KEFF_AVG, KEFF_ABS_STD
+
+
+@njit
+def sync_bank(SRC_BANK: ndarray, ESTIMATOR: ndarray):
+
+    # Convert into integer
+    IDX_FISS_BANK = int(ESTIMATOR['IDX_FISS_BANK'])
+
+    # Determine how many samples needed
+    if IDX_FISS_BANK < N_PARTICLE:
+        SITES_NEEDED = N_PARTICLE % IDX_FISS_BANK
+    else:
+        SITES_NEEDED = N_PARTICLE
+    P_SAMPLE = SITES_NEEDED / IDX_FISS_BANK
+
+    # Population control
+    TEMP_BANK = np.zeros(5*N_PARTICLE, dtype=PARTICLE_TYPE)
+    idx_temp = 0
+    for P in FISS_BANK[:IDX_FISS_BANK]:
+
+        # Duplicate multiple times if less than the bank
+        if (IDX_FISS_BANK < N_PARTICLE):
+            for idx in range(N_PARTICLE//IDX_FISS_BANK):
+                TEMP_BANK[idx_temp] = P
+                idx_temp += 1
+
+        # Duplicate randomly
+        if random.random() < P_SAMPLE:
+            TEMP_BANK[idx_temp] = P
+            idx_temp += 1
+
+    # Makes sure the temp bank consists of N_PARTICLE
+    if idx_temp < N_PARTICLE:
+        SITES_NEEDED = N_PARTICLE-idx_temp
+        for idx in range(SITES_NEEDED):
+            idx_fb = IDX_FISS_BANK - SITES_NEEDED + idx
+            TEMP_BANK[idx_temp] = FISS_BANK[idx_fb]
+            idx_temp += 1
+
+    # Now copy the temp bank to new source bank
+    SRC_BANK = TEMP_BANK[:N_PARTICLE]
+
+    # Normalize the weight
+    # Cant do /= nor vectorized op
+    TOT_WGT = SRC_BANK['wgt'].sum()
+    for idx in range(N_PARTICLE):
+        SRC_BANK[idx]['wgt'] /= TOT_WGT
+    # SRC_BANK['wgt'] = np.divide(SRC_BANK['wgt'], TOT_WGT)
+
+    # Reset index for next generation
+    ESTIMATOR['IDX_FISS_BANK'] = 0
 
 
 # =============================================================================
-# REACTION CHANNEL
+# REACTION
 # =============================================================================
 
 @njit
-def sample_fission(P, IDX_FISS_BANK, FISS_BANK) -> int:
+def sample_fission(P, FISS_BANK, ESTIMATOR):
 
     # Calculate expected num of fiss neutrons
-    NU_EXP = P['wgt'] / KEFF_CURRENT * NU_XSF / XS_T
+    NU_EXP = P['wgt'] / ESTIMATOR['KEFF_CURRENT'] * NU_XSF / XS_T
 
     # Determine how many fission neutrons actually sampled
     N_SAMPLE = int(NU_EXP)
@@ -78,16 +131,16 @@ def sample_fission(P, IDX_FISS_BANK, FISS_BANK) -> int:
 
     # Early returns
     if N_SAMPLE == 0:
-        return IDX_FISS_BANK
+        return
 
     # Sample fission neutrons
+    idx = int(ESTIMATOR['IDX_FISS_BANK'])
     for _ in range(N_SAMPLE):
-        FISS_BANK[IDX_FISS_BANK]['x'] = P['x']
-        FISS_BANK[IDX_FISS_BANK]['y'] = P['y']
-        FISS_BANK[IDX_FISS_BANK]['z'] = P['z']
-        FISS_BANK[IDX_FISS_BANK]['wgt'] = 1.0
-        IDX_FISS_BANK += 1
-    return IDX_FISS_BANK
+        FISS_BANK[idx]['x'] = P['x']
+        FISS_BANK[idx]['y'] = P['y']
+        FISS_BANK[idx]['z'] = P['z']
+        FISS_BANK[idx]['wgt'] = 1.0
+        ESTIMATOR['IDX_FISS_BANK'] += 1
 
 
 @njit
@@ -103,7 +156,7 @@ def sample_absorption(P) -> None:
 
 
 @njit
-def sample_isotropic(P) -> None:
+def sample_isotropic(P: ndarray) -> None:
     AZIM = PI_DOUBLE * lcg(P)
     MU = 2.0 * lcg(P) - 1.0
     SQRT_TERM = (1.0 - MU**2) ** 0.5
@@ -148,7 +201,7 @@ def init_particle(IDX_SRC: int, IDX_GEN: int) -> ndarray:
 
 
 @njit
-def sample_dts(P) -> float:
+def sample_dts(P: ndarray) -> float:
 
     # Get constants
     PLANES = get_surfs()
@@ -179,7 +232,7 @@ def sample_dts(P) -> float:
 
 
 @njit
-def move(P) -> bool:
+def move(P: ndarray) -> bool:
     DTC = -math.log(lcg(P)) / XS_T
     DTS, SURF_ID = sample_dts(P)
     IS_REFLECTED = DTS < DTC
@@ -206,8 +259,8 @@ def move(P) -> bool:
     return IS_REFLECTED
 
 
-# cant be jitted to update idx fiss bank
-def collision(P):
+# njit: crash wo warning
+def collision(P: ndarray, ESTIMATOR: ndarray):
 
     # Move particle
     IS_REFLECTED = move(P)
@@ -215,8 +268,7 @@ def collision(P):
         return
 
     # Sample fission neutrons implicitly
-    global IDX_FISS_BANK, FISS_BANK
-    IDX_FISS_BANK = sample_fission(P, IDX_FISS_BANK, FISS_BANK)
+    sample_fission(P, FISS_BANK, ESTIMATOR)
 
     # Sample absorption
     sample_absorption(P)
@@ -225,53 +277,3 @@ def collision(P):
 
     # Sample scattering
     sample_isotropic(P)
-
-
-# =============================================================================
-# PARTICLE BANK OPERATIONS
-# =============================================================================
-
-def sync_bank():
-
-    # Determine how many samples needed
-    global IDX_FISS_BANK
-    IDX_FISS_BANK -= 1
-    if IDX_FISS_BANK-1 < N_PARTICLE:
-        SITES_NEEDED = N_PARTICLE % IDX_FISS_BANK
-    else:
-        SITES_NEEDED = N_PARTICLE
-    P_SAMPLE = SITES_NEEDED / IDX_FISS_BANK
-
-    # Population control
-    TEMP_BANK = np.zeros(5*N_PARTICLE, dtype=PARTICLE_TYPE)
-    idx_temp = 0
-    for P in FISS_BANK:
-
-        # Duplicate multiple times if less than the bank
-        if (IDX_FISS_BANK < N_PARTICLE):
-            for idx in range(N_PARTICLE//IDX_FISS_BANK):
-                TEMP_BANK[idx_temp] = P
-                idx_temp += 1
-
-        # Duplicate randomly
-        if random.random() < P_SAMPLE:
-            TEMP_BANK[idx_temp] = P
-            idx_temp += 1
-
-    # Makes sure the temp bank consists of N_PARTICLE
-    if idx_temp < N_PARTICLE:
-        SITES_NEEDED = N_PARTICLE-idx_temp
-        for idx in range(SITES_NEEDED):
-            idx_fb = IDX_FISS_BANK - SITES_NEEDED + idx
-            TEMP_BANK[idx_temp] = FISS_BANK[idx_fb]
-            idx_temp += 1
-
-    # Now copy the temp bank to new source bank
-    for idx in range(N_PARTICLE):
-        SRC_BANK[idx] = TEMP_BANK[idx]
-
-    # Normalize the weight
-    SRC_BANK['wgt'] /= SRC_BANK['wgt'].sum()
-
-    # Reset index for next generation
-    IDX_FISS_BANK = 0

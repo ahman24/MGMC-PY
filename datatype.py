@@ -6,7 +6,14 @@ import numpy as np
 # =============================================================================
 
 
-SEED_STATE = np.dtype([('seed', np.uint64)])
+ESTIMATOR_TYPE = np.dtype([
+    ('KEFF_TL_SUM', np.float64),
+    ('KEFF_CURRENT', np.float64),
+    ('KEFF_SUM', np.float64),
+    ('KEFF_SUMSQ', np.float64),
+    ('IDX_FISS_BANK', np.float64),
+])
+
 
 PARTICLE_TYPE = np.dtype([
     ('seed',  np.uint64),

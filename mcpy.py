@@ -1,5 +1,8 @@
 from input import N_PARTICLE, N_GENERATION
+from datatype import ESTIMATOR_TYPE
 import kernel
+
+import numpy as np
 
 
 # =============================================================================
@@ -7,15 +10,17 @@ import kernel
 # =============================================================================
 
 
-# @njit
 def main():
+
+    # Init eigen estimator
+    ESTIMATOR = np.zeros(1, dtype=ESTIMATOR_TYPE)[0]
+    ESTIMATOR['KEFF_CURRENT'] = 1.0
 
     # Loop until the last fission generations
     for idx_gen in range(N_GENERATION):
 
         # Loop until the last particle of current generation
         print(f"Gen {idx_gen+1} : ", end="")
-        KEFF_TL_SUM = 0.0
         for idx_src in range(N_PARTICLE):
 
             # Init particle
@@ -23,19 +28,21 @@ def main():
 
             # Begin random walks until terminated
             while True:
-                kernel.collision(P)
+                kernel.collision(P, ESTIMATOR)
                 if P['wgt'] == 0.0:
-                    KEFF_TL_SUM += P['keff']
                     break
 
+            # Accumulate track-length estimator
+            ESTIMATOR['KEFF_TL_SUM'] += P['keff']
+
         # Current generation completed: Calculate average keff
-        kernel.generation_closeout(idx_gen, KEFF_TL_SUM)
+        KEFF, STD = kernel.generation_closeout(idx_gen, ESTIMATOR)
 
-        # Calc SE
-
-        # Perform UFS
-
-        # Sync fiss bank to src bank
+        # Report keff
+        if STD != 0.0:
+            print(f"{KEFF:.5f} +/- {STD:.5f}")
+            continue
+        print(f"{KEFF:.5f}")
 
 
 if __name__ == "__main__":

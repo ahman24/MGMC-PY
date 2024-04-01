@@ -1,5 +1,3 @@
-from datatype import SEED_STATE
-
 import numpy as np
 import numba as nb
 from numba import njit
