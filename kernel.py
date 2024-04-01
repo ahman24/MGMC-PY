@@ -1,6 +1,7 @@
 from input import NU_XSF, XS_A, XS_T
 from input import N_INACTIVE, N_PARTICLE
 from input import PLANES
+from input import CONVERGENCE_METRIC, SE_NX, SE_NY, BIN_X, BIN_Y, BIN_Z
 from datatype import PARTICLE_TYPE
 from prng import lcg, skip_ahead
 
@@ -26,12 +27,17 @@ FISS_BANK = np.zeros(3*N_PARTICLE, dtype=PARTICLE_TYPE)
 
 
 @njit
-def generation_closeout(idx_gen: int, ESTIMATOR: ndarray) -> list[float]:
+def generation_closeout(idx_gen: int, ESTIMATOR: ndarray, METRIC_SE, METRIC_SE_MESH, METRIC_COM) -> list[float]:
 
     # Update current generation keff
     ESTIMATOR['KEFF_CURRENT'] = ESTIMATOR['KEFF_TL_SUM'] / N_PARTICLE
 
-    # Calc SE
+    # Calculate convergence metrics
+    if CONVERGENCE_METRIC:
+        calculate_convergence_metrics(
+            idx_gen, int(ESTIMATOR['IDX_FISS_BANK']),
+            METRIC_SE, METRIC_SE_MESH,
+            METRIC_COM)
 
     # Perform UFS
 
@@ -61,6 +67,11 @@ def generation_closeout(idx_gen: int, ESTIMATOR: ndarray) -> list[float]:
 
     # Report average keff
     return KEFF_AVG, KEFF_ABS_STD
+
+
+def report(KEFF, STD, SE, COM) -> None:
+    print(
+        f"{KEFF:.5f} +/- {STD:.5f} {SE:.2f} ({COM[0]:.2f}, {COM[1]:.2f}, {COM[2]:.2f})")
 
 
 @njit
@@ -112,6 +123,35 @@ def sync_bank(SRC_BANK: ndarray, ESTIMATOR: ndarray):
 
     # Reset index for next generation
     ESTIMATOR['IDX_FISS_BANK'] = 0
+
+
+@njit
+def calculate_convergence_metrics(idx_gen: int, IDX_FISS_BANK: int, METRIC_SE: ndarray, METRIC_SE_MESH: ndarray, METRIC_COM: ndarray) -> None:
+
+    # Calculate idx corresponding to SE mesh
+    IDX_X = np.searchsorted(BIN_X, FISS_BANK[:IDX_FISS_BANK]['x'])
+    IDX_Y = np.searchsorted(BIN_Y, FISS_BANK[:IDX_FISS_BANK]['y'])
+    IDX_Z = np.searchsorted(BIN_Z, FISS_BANK[:IDX_FISS_BANK]['z'])
+    IDX = IDX_X + SE_NX*(IDX_Y-1) + (SE_NX*SE_NY) * (IDX_Z-1)
+
+    # Calculate SE
+    TOT_WGT = FISS_BANK[:IDX_FISS_BANK]['wgt'].sum()
+    for loc, P in zip(IDX, FISS_BANK[IDX]):
+        METRIC_SE_MESH[int(loc)] += P['wgt'] / TOT_WGT
+    NON_ZERO_ENTRY = METRIC_SE_MESH[METRIC_SE_MESH != 0.0]
+    SE = -(NON_ZERO_ENTRY * np.log2(NON_ZERO_ENTRY)).sum()
+    METRIC_SE[idx_gen] = SE
+
+    # Reset SE mesh for next generation
+    METRIC_SE_MESH.fill(0)
+
+    # Calculate CoM
+    METRIC_COM[idx_gen, 0] = (FISS_BANK[:IDX_FISS_BANK]['wgt'] *
+                              FISS_BANK[:IDX_FISS_BANK]['x']).mean()
+    METRIC_COM[idx_gen, 1] = (FISS_BANK[:IDX_FISS_BANK]['wgt'] *
+                              FISS_BANK[:IDX_FISS_BANK]['y']).mean()
+    METRIC_COM[idx_gen, 2] = (FISS_BANK[:IDX_FISS_BANK]['wgt'] *
+                              FISS_BANK[:IDX_FISS_BANK]['z']).mean()
 
 
 # =============================================================================

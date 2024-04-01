@@ -1,4 +1,5 @@
 from input import SEED, N_PARTICLE, N_GENERATION
+from input import CONVERGENCE_METRIC, SE_NX, SE_NY, SE_NZ
 from datatype import ESTIMATOR_TYPE
 import kernel
 from prng import set_seed
@@ -20,6 +21,12 @@ def main():
     ESTIMATOR = np.zeros(1, dtype=ESTIMATOR_TYPE)[0]
     ESTIMATOR['KEFF_CURRENT'] = 1.0
 
+    # Init convergence metrics
+    if CONVERGENCE_METRIC:
+        METRIC_SE = np.zeros(N_GENERATION, dtype=np.float64)
+        METRIC_SE_MESH = np.zeros([SE_NX*SE_NY*SE_NZ], dtype=np.float64)
+        METRIC_COM = np.zeros((N_GENERATION, 3), dtype=np.float64)
+
     # Loop until the last fission generations
     for idx_gen in range(N_GENERATION):
 
@@ -40,13 +47,11 @@ def main():
             ESTIMATOR['KEFF_TL_SUM'] += P['keff']
 
         # Current generation completed: Calculate average keff
-        KEFF, STD = kernel.generation_closeout(idx_gen, ESTIMATOR)
+        KEFF, STD = kernel.generation_closeout(
+            idx_gen, ESTIMATOR, METRIC_SE, METRIC_SE_MESH, METRIC_COM)
 
         # Report keff
-        if STD != 0.0:
-            print(f"{KEFF:.5f} +/- {STD:.5f}")
-            continue
-        print(f"{KEFF:.5f}")
+        kernel.report(KEFF, STD, METRIC_SE[idx_gen], METRIC_COM[idx_gen, :])
 
 
 if __name__ == "__main__":

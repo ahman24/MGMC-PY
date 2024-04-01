@@ -26,11 +26,16 @@ SEED = 1
 N_PARTICLE = int(1_000)
 N_INACTIVE = 50
 N_GENERATION = int(10_000)
-# N_GENERATION = int(100)
 
-SHANNON_ENTROPY = True
+CONVERGENCE_METRIC = True
 SE_NX, SE_NY, SE_NZ = 8, 8, 8
-SE_BIN = np.zeros([SE_NX*SE_NY*SE_NZ])
+BIN_X = np.linspace(PX_LHS, PX_RHS, SE_NX+1, endpoint=True)
+BIN_Y = np.linspace(PX_LHS, PX_RHS, SE_NX+1, endpoint=True)
+BIN_Z = np.linspace(PX_LHS, PX_RHS, SE_NX+1, endpoint=True)
+BIN_WIDTH_X = (PX_RHS - PX_LHS) / SE_NX
+BIN_WIDTH_Y = (PY_RHS - PY_LHS) / SE_NY
+BIN_WIDTH_Z = (PZ_RHS - PZ_LHS) / SE_NZ
+
 
 UFS = True
 UFS_NX, UFS_NY, UFS_NZ = 2, 2, 2
