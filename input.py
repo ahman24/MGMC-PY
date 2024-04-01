@@ -22,6 +22,7 @@ PLANES = [PX_RHS, PY_RHS, PZ_RHS, PX_LHS, PY_LHS, PZ_LHS]
 
 
 # Simulation params
+SEED = 1
 N_PARTICLE = int(1_000)
 N_INACTIVE = 50
 N_GENERATION = int(10_000)

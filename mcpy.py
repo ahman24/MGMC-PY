@@ -1,6 +1,7 @@
-from input import N_PARTICLE, N_GENERATION
+from input import SEED, N_PARTICLE, N_GENERATION
 from datatype import ESTIMATOR_TYPE
 import kernel
+from prng import set_seed
 
 import numpy as np
 
@@ -11,6 +12,9 @@ import numpy as np
 
 
 def main():
+
+    # Init simulation seed
+    set_seed(SEED)
 
     # Init eigen estimator
     ESTIMATOR = np.zeros(1, dtype=ESTIMATOR_TYPE)[0]
