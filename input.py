@@ -1,7 +1,6 @@
 from datatype import PARTICLE_TYPE
 
 import numpy as np
-from numba import njit
 
 # =============================================================================
 # MGXS
@@ -17,8 +16,9 @@ NU_XSF = K_EFF * XS_A
 # =============================================================================
 
 # Geom
-PX_RHS, PY_RHS, PZ_RHS = 1.0, 1.0, 1.0
+PX_RHS, PY_RHS, PZ_RHS = 200.0, 200.0, 200.0
 PX_LHS, PY_LHS, PZ_LHS = -PX_RHS, -PY_RHS, -PZ_RHS
+PLANES = [PX_RHS, PY_RHS, PZ_RHS, PX_LHS, PY_LHS, PZ_LHS]
 
 
 # Simulation params
@@ -34,11 +34,3 @@ SE_BIN = np.zeros([SE_NX*SE_NY*SE_NZ])
 UFS = True
 UFS_NX, UFS_NY, UFS_NZ = 2, 2, 2
 UFS_BIN = np.zeros([UFS_NX*UFS_NY*UFS_NZ])
-
-
-# =============================================================================
-# GETTER
-# =============================================================================
-@njit
-def get_surfs() -> list[float]:
-    return [PX_RHS, PY_RHS, PZ_RHS, PX_LHS, PY_LHS, PZ_LHS]

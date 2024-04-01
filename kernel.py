@@ -1,6 +1,6 @@
 from input import NU_XSF, XS_A, XS_T
 from input import N_INACTIVE, N_PARTICLE
-from input import get_surfs
+from input import PLANES
 from datatype import PARTICLE_TYPE
 from prng import lcg, skip_ahead
 
@@ -134,8 +134,8 @@ def sample_fission(P, FISS_BANK, ESTIMATOR):
         return
 
     # Sample fission neutrons
-    idx = int(ESTIMATOR['IDX_FISS_BANK'])
     for _ in range(N_SAMPLE):
+        idx = int(ESTIMATOR['IDX_FISS_BANK'])
         FISS_BANK[idx]['x'] = P['x']
         FISS_BANK[idx]['y'] = P['y']
         FISS_BANK[idx]['z'] = P['z']
@@ -201,59 +201,55 @@ def init_particle(IDX_SRC: int, IDX_GEN: int) -> ndarray:
 
 
 @njit
-def sample_dts(P: ndarray) -> float:
+def sample_dts(P: ndarray, PLANES: list[float]) -> float:
 
     # Get constants
-    PLANES = get_surfs()
     dts = 1e10
+    IDX_PLANE = [0, 1, 2]*2
+    POSITIONS = [P['x'], P['y'], P['z']]*2
+    DIRECTIONS = [P['u'], P['v'], P['w']]*2
 
-    for idx_plane, plane in enumerate(PLANES):
-
-        # relevant position and dir
-        IDX = idx_plane // 3 + 1
-        if IDX == 0:
-            pos = P['x']
-            dir = P['u']
-        elif IDX == 1:
-            pos = P['y']
-            dir = P['v']
-        else:
-            pos = P['z']
-            dir = P['w']
+    for idx, plane, pos, dir in zip(IDX_PLANE, PLANES, POSITIONS, DIRECTIONS):
 
         # calc plane dts
         curr_dts = (plane - pos) / dir
 
         # get lowest non-negative distance
         if curr_dts > 0 and curr_dts < dts:
-            SURF_ID = idx_plane
+            surf_id = idx
             dts = curr_dts
-    return dts, SURF_ID
+    return dts, surf_id
 
 
 @njit
-def move(P: ndarray) -> bool:
+def move(P: ndarray, PLANES: list[float]) -> bool:
     DTC = -math.log(lcg(P)) / XS_T
-    DTS, SURF_ID = sample_dts(P)
+    DTS, IDX_PLANE = sample_dts(P, PLANES)
     IS_REFLECTED = DTS < DTC
-    IS_COLLISION = not IS_REFLECTED
+
+    # Reflect direction
     if IS_REFLECTED:
         DTC = DTS
-        P['x'] += P['u']*DTC
-        P['y'] += P['v']*DTC
-        P['z'] += P['w']*DTC
-        IDX_POS = SURF_ID % 3
-        if IDX_POS == 0:
+
+    # Move particle
+    P['x'] += P['u']*DTC
+    P['y'] += P['v']*DTC
+    P['z'] += P['w']*DTC
+
+    # Update outgoing direction and prevent surface coincidence
+    if IS_REFLECTED:
+        if IDX_PLANE == 0:
             P['u'] *= -1
-        elif IDX_POS == 1:
+        elif IDX_PLANE == 1:
             P['v'] *= -1
         else:
             P['w'] *= -1
-    elif IS_COLLISION:
-        P['x'] += P['u']*DTC
-        P['y'] += P['v']*DTC
-        P['z'] += P['w']*DTC
 
+        P['x'] += P['u']*1e-13
+        P['y'] += P['v']*1e-13
+        P['z'] += P['w']*1e-13
+
+    # Accumulate track-length tallies
     P['keff'] += P['wgt'] * DTC * NU_XSF
     P['ncoll'] += 1
     return IS_REFLECTED
@@ -263,7 +259,7 @@ def move(P: ndarray) -> bool:
 def collision(P: ndarray, ESTIMATOR: ndarray):
 
     # Move particle
-    IS_REFLECTED = move(P)
+    IS_REFLECTED = move(P, PLANES)
     if IS_REFLECTED:
         return
 
