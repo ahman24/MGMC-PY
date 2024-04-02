@@ -26,4 +26,5 @@ PARTICLE_TYPE = np.dtype([
     ('wgt', np.float64),
     ('ncoll', np.uint64),
     ('keff', np.float64),
+    ('n_secondary', np.uint64),
 ])

@@ -1,5 +1,6 @@
 import numba as nb
 import random
+import numpy as np
 from numba import njit
 
 # =============================================================================
@@ -47,4 +48,5 @@ def skip_ahead(IDX_P: int) -> nb.uint64:
 
 def set_seed(SEED: int) -> None:
     RNG_MASTER_SEED = SEED
+    np.random.seed(SEED)
     random.seed(SEED)

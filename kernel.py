@@ -1,13 +1,15 @@
-from input import NU_XSF, XS_A, XS_T
+from input import NU_XSF, XS_A, XS_S, XS_T
 from input import N_INACTIVE, N_PARTICLE
-from input import CONVERGENCE_METRIC, SE_NX, SE_NY, SE_NZ, BIN_X, BIN_Y, BIN_Z
+from input import CONVERGENCE_METRIC, SE_NX, SE_NY, BIN_X, BIN_Y, BIN_Z
+from input import RUSSIAN_ROULETTE, ROULETTE_WGT_THRESHOLD, ROULETTE_WGT_SURVIVE
+from input import BRANCHLESS_POP_CTRL
 from datatype import PARTICLE_TYPE
 from prng import lcg, skip_ahead
 
 import random  # for synching bank
 import math
 import numba as nb
-from numba import njit
+from numba import njit, prange
 import numpy as np
 from numpy import ndarray
 
@@ -22,7 +24,7 @@ PI_DOUBLE = nb.float64(2.0*math.pi)
 # =============================================================================
 
 @njit
-def init_generation(FISS_BANK: ndarray, ESTIMATOR: ndarray):
+def init_generation(FISS_BANK: ndarray, ESTIMATOR: ndarray, METRIC_SE_MESH: ndarray):
 
     # Reset fission bank and index
     IDX = int(ESTIMATOR['IDX_FISS_BANK'])
@@ -32,9 +34,12 @@ def init_generation(FISS_BANK: ndarray, ESTIMATOR: ndarray):
     # Reset keff generation-wise running-sum
     ESTIMATOR['KEFF_TL_SUM'] = 0.0
 
+    # Reset SE mesh src_frac of previous generation
+    METRIC_SE_MESH.fill(0.0)
+
 
 @njit
-def generation_closeout(idx_gen: int, SRC_BANK: ndarray, FISS_BANK: ndarray, ESTIMATOR: ndarray, METRIC_SE: ndarray, METRIC_COM: ndarray) -> list[float]:
+def generation_closeout(idx_gen: int, SRC_BANK: ndarray, FISS_BANK: ndarray, ESTIMATOR: ndarray, METRIC_SE: ndarray, METRIC_SE_MESH: ndarray, METRIC_COM: ndarray) -> list[float]:
 
     # Update current generation keff
     ESTIMATOR['KEFF_CURRENT'] = ESTIMATOR['KEFF_TL_SUM'] / N_PARTICLE
@@ -42,12 +47,8 @@ def generation_closeout(idx_gen: int, SRC_BANK: ndarray, FISS_BANK: ndarray, EST
     # Calculate convergence metrics
     if CONVERGENCE_METRIC:
         IDX_FISS_BANK = int(ESTIMATOR['IDX_FISS_BANK'])
-        SE, COM_X, COM_Y, COM_Z = calculate_convergence_metrics(
-            FISS_BANK[:IDX_FISS_BANK])
-        METRIC_SE[idx_gen] = SE
-        METRIC_COM[idx_gen, 0] = COM_X
-        METRIC_COM[idx_gen, 1] = COM_Y
-        METRIC_COM[idx_gen, 2] = COM_Z
+        calculate_convergence_metrics(idx_gen, FISS_BANK[:IDX_FISS_BANK],
+                                      METRIC_SE, METRIC_SE_MESH, METRIC_COM)
 
     # Perform UFS
 
@@ -80,52 +81,54 @@ def report(KEFF, STD, SE, COM) -> None:
         f"{KEFF:.5f} +/- {STD:.5f} {SE:.2f} ({COM[0]:.2f}, {COM[1]:.2f}, {COM[2]:.2f})")
 
 
-@njit
+@njit(parallel=True)
 def sync_bank(SRC_BANK: ndarray, FISS_BANK: ndarray, ESTIMATOR: ndarray):
+    """
+    Perform population control to ensure SRC_BANK size of the next generation 
+    is equal to N_PARTICLE.
 
-    # Convert into integer
+    VERY IMPORTANT
+    --------------
+    Note that the sampling process MUST BE WEIGHTED since fission neutrons weights
+    are not uniform (especially in branchless simulation). 
+
+    Here we can use shortcut by using available function in numpy, but at the cost
+    of not being able to use numba for both generation_closeout and sync_bank functions.
+    For now, lets juts do it manually until we figured a solution.
+    """
+
+    # Calculate probability of each elem to be selected during weighted sampling
     IDX_FISS_BANK = int(ESTIMATOR['IDX_FISS_BANK'])
+    P_SAMPLE = FISS_BANK[:IDX_FISS_BANK]['wgt'] / \
+        FISS_BANK[:IDX_FISS_BANK]['wgt'].sum()
 
-    # Determine how many samples needed
-    if IDX_FISS_BANK < N_PARTICLE:
-        SITES_NEEDED = N_PARTICLE % IDX_FISS_BANK
-    else:
-        SITES_NEEDED = N_PARTICLE
-    P_SAMPLE = SITES_NEEDED / IDX_FISS_BANK
+    # Weighted sampling: Numpy
+    # SRC_BANK = np.random.choice(
+    #     FISS_BANK, N_PARTICLE, replace=False, p=P_SAMPLE).astype(PARTICLE_TYPE)
 
-    # Population control
-    TEMP_BANK = np.zeros(3*N_PARTICLE, dtype=PARTICLE_TYPE)
-    idx_temp = 0
-    for P in FISS_BANK[:IDX_FISS_BANK]:
+    # Weighted sampling: Manual
+    idx_selected = 0
+    TOT_WGT = 0
+    while idx_selected != N_PARTICLE:
+        for idx_p, prob in enumerate(P_SAMPLE):
+            if random.random() < prob:
+                SRC_BANK[idx_selected]['x'] = FISS_BANK[idx_p]['x']
+                SRC_BANK[idx_selected]['y'] = FISS_BANK[idx_p]['y']
+                SRC_BANK[idx_selected]['z'] = FISS_BANK[idx_p]['z']
+                SRC_BANK[idx_selected]['wgt'] = FISS_BANK[idx_p]['wgt']
+                TOT_WGT += FISS_BANK[idx_p]['wgt']
+                idx_selected += 1
+            if idx_selected == N_PARTICLE:
+                break
 
-        # Duplicate multiple times if less than the bank
-        if (IDX_FISS_BANK < N_PARTICLE):
-            for idx in range(N_PARTICLE//IDX_FISS_BANK):
-                TEMP_BANK[idx_temp] = P
-                idx_temp += 1
-
-        # Duplicate randomly
-        if random.random() < P_SAMPLE:
-            TEMP_BANK[idx_temp] = P
-            idx_temp += 1
-
-    # Makes sure the temp bank consists of N_PARTICLE
-    if idx_temp < N_PARTICLE:
-        SITES_NEEDED = N_PARTICLE-idx_temp
-        for idx in range(SITES_NEEDED):
-            idx_fb = IDX_FISS_BANK - SITES_NEEDED + idx
-            TEMP_BANK[idx_temp] = FISS_BANK[idx_fb]
-            idx_temp += 1
-
-    # Now copy the temp bank to new source bank
-    RATIO = N_PARTICLE / TEMP_BANK[:N_PARTICLE]['wgt'].sum()
-    for idx in range(N_PARTICLE):
-        SRC_BANK[idx] = TEMP_BANK[idx]
-        SRC_BANK[idx]['wgt'] /= RATIO
+    # Normalize source bank weights
+    WGT_MULT = N_PARTICLE / TOT_WGT
+    for idx in prange(N_PARTICLE):
+        SRC_BANK[idx]['wgt'] *= WGT_MULT
 
 
 @njit
-def calculate_convergence_metrics(FISS_BANK: ndarray) -> list[float]:
+def calculate_convergence_metrics(IDX_GEN: int, FISS_BANK: ndarray, METRIC_SE: ndarray, METRIC_SE_MESH: ndarray, METRIC_COM: ndarray) -> list[float]:
 
     # Calculate idx corresponding to SE mesh
     IDX_X = np.searchsorted(BIN_X, FISS_BANK['x'])
@@ -133,23 +136,20 @@ def calculate_convergence_metrics(FISS_BANK: ndarray) -> list[float]:
     IDX_Z = np.searchsorted(BIN_Z, FISS_BANK['z'])
     IDX = IDX_X-1 + SE_NX*(IDX_Y-1) + (SE_NX*SE_NY) * (IDX_Z-1)
 
-    # Init SE mesh bin
-    METRIC_SE_MESH = np.zeros(SE_NX*SE_NY*SE_NZ)
-
     # Calculate SE
+    # Note that the lowest entropy value is 0.0
     TOT_WGT = FISS_BANK['wgt'].sum()
     for loc, P in zip(IDX, FISS_BANK[IDX]):
         METRIC_SE_MESH[int(loc)] += P['wgt'] / TOT_WGT
     NON_ZERO_ENTRY = METRIC_SE_MESH[METRIC_SE_MESH != 0.0]
-    SE = -(NON_ZERO_ENTRY * np.log2(NON_ZERO_ENTRY)).sum()
+    METRIC_SE[IDX_GEN] = -(NON_ZERO_ENTRY * np.log2(NON_ZERO_ENTRY)).sum()
+    if METRIC_SE[IDX_GEN] < 0.0:
+        METRIC_SE[IDX_GEN] = 0.0
 
     # Calculate CoM
-    COM_X = (FISS_BANK['wgt'] * FISS_BANK['x']).mean()
-    COM_Y = (FISS_BANK['wgt'] * FISS_BANK['y']).mean()
-    COM_Z = (FISS_BANK['wgt'] * FISS_BANK['z']).mean()
-
-    # Return values
-    return SE, COM_X, COM_Y, COM_Z
+    METRIC_COM[IDX_GEN, 0] = (FISS_BANK['wgt'] * FISS_BANK['x']).mean()
+    METRIC_COM[IDX_GEN, 1] = (FISS_BANK['wgt'] * FISS_BANK['y']).mean()
+    METRIC_COM[IDX_GEN, 2] = (FISS_BANK['wgt'] * FISS_BANK['z']).mean()
 
 
 # =============================================================================
@@ -159,17 +159,34 @@ def calculate_convergence_metrics(FISS_BANK: ndarray) -> list[float]:
 @njit
 def sample_fission(P, FISS_BANK, ESTIMATOR):
 
+    # Branchless: explicitly sample fission reaction
+    BC_OUTGOING_WGT = 1.0
+    if BRANCHLESS_POP_CTRL:
+
+        # No fission reaction
+        if lcg(P) > bc_calc_prob_fission():
+            return
+
+        # Fission reaction
+        N_SAMPLE = 1
+        BC_OUTGOING_WGT = bc_calc_outgoing_wgt(P)
+        P['wgt'] = 0.0
+        if BC_OUTGOING_WGT > ROULETTE_WGT_SURVIVE:
+            N_SAMPLE += int(P['wgt'] / ROULETTE_WGT_SURVIVE)
+            BC_OUTGOING_WGT /= N_SAMPLE
+
     # Calculate expected num of fiss neutrons
-    NU_EXP = P['wgt'] / ESTIMATOR['KEFF_CURRENT'] * NU_XSF / XS_T
+    else:
+        NU_EXP = P['wgt'] / ESTIMATOR['KEFF_CURRENT'] * NU_XSF / XS_T
 
-    # Determine how many fission neutrons actually sampled
-    N_SAMPLE = int(NU_EXP)
-    if lcg(P) < (NU_EXP - N_SAMPLE):
-        N_SAMPLE += 1
+        # Determine how many fission neutrons actually sampled
+        N_SAMPLE = int(NU_EXP)
+        if lcg(P) < (NU_EXP - N_SAMPLE):
+            N_SAMPLE += 1
 
-    # Early returns
-    if N_SAMPLE == 0:
-        return
+        # Early returns
+        if N_SAMPLE == 0:
+            return
 
     # Sample fission neutrons
     for _ in range(N_SAMPLE):
@@ -177,16 +194,30 @@ def sample_fission(P, FISS_BANK, ESTIMATOR):
         FISS_BANK[idx]['x'] = P['x']
         FISS_BANK[idx]['y'] = P['y']
         FISS_BANK[idx]['z'] = P['z']
-        FISS_BANK[idx]['wgt'] = 1.0
+        FISS_BANK[idx]['wgt'] = BC_OUTGOING_WGT
         ESTIMATOR['IDX_FISS_BANK'] += 1
 
 
 @njit
 def sample_absorption(P) -> None:
+
+    # Branchless Collision: do not sample absorption
+    if BRANCHLESS_POP_CTRL:
+        return
+
+    # Otherwise, sample
     if lcg(P)*XS_T < XS_A:
         P['wgt'] = 0.0
-    return
 
+
+@njit
+def bc_calc_prob_fission() -> float:
+    return NU_XSF / (NU_XSF + XS_S)
+
+
+@njit
+def bc_calc_outgoing_wgt(P) -> float:
+    return P['wgt'] * (NU_XSF + XS_S) / XS_T
 
 # =============================================================================
 # PARTICLE PHYSICS
@@ -195,6 +226,8 @@ def sample_absorption(P) -> None:
 
 @njit
 def sample_isotropic(P: ndarray) -> None:
+
+    # Sample isotropic direction
     AZIM = PI_DOUBLE * lcg(P)
     MU = 2.0 * lcg(P) - 1.0
     SQRT_TERM = (1.0 - MU**2) ** 0.5
@@ -205,7 +238,7 @@ def sample_isotropic(P: ndarray) -> None:
 
 
 @njit
-def init_particle(IDX_SRC: int, IDX_GEN: int, SRC_BANK: ndarray) -> ndarray:
+def init_particle(IDX_SRC: int, IDX_GEN: int, SRC_BANK: ndarray, SECONDARY_BANK: ndarray) -> ndarray:
     """
     Note:
     We cant modify directly by doing
@@ -217,6 +250,9 @@ def init_particle(IDX_SRC: int, IDX_GEN: int, SRC_BANK: ndarray) -> ndarray:
     So instead we just inherit attrs to new particle
 
     """
+
+    # Clear particle secondary bank
+    SECONDARY_BANK[:] = np.zeros(3*N_PARTICLE, dtype=PARTICLE_TYPE)
 
     # Init particle and seed
     P = np.zeros(1, dtype=PARTICLE_TYPE)[0]
@@ -234,6 +270,24 @@ def init_particle(IDX_SRC: int, IDX_GEN: int, SRC_BANK: ndarray) -> ndarray:
     if IDX_GEN == 0:
         P['wgt'] = 1.0
     return P
+
+
+@njit
+def revive_from_secondary(P: ndarray, SECONDARY_BANK: ndarray) -> ndarray:
+
+    # Get P idx from secondary bank to revive
+    IDX = int(P['n_secondary']) - 1
+
+    # Inherit attrs from the particle
+    P['x'] = SECONDARY_BANK[IDX]['x']
+    P['y'] = SECONDARY_BANK[IDX]['y']
+    P['z'] = SECONDARY_BANK[IDX]['z']
+    sample_isotropic(P)
+    P['wgt'] = SECONDARY_BANK[IDX]['wgt']
+    P['ncoll'] = SECONDARY_BANK[IDX]['ncoll']
+
+    # Reduce the secondary bank counter
+    P['n_secondary'] -= 1
 
 
 @njit
@@ -292,7 +346,7 @@ def move(P: ndarray, PLANES: list[float]) -> bool:
 
 
 @njit
-def collision(P: ndarray, PLANES: list[float], ESTIMATOR: ndarray, FISS_BANK: ndarray):
+def collision(P: ndarray, PLANES: list[float], ESTIMATOR: ndarray, FISS_BANK: ndarray, SECONDARY_BANK: ndarray):
 
     # Move particle
     IS_REFLECTED = move(P, PLANES)
@@ -309,3 +363,42 @@ def collision(P: ndarray, PLANES: list[float], ESTIMATOR: ndarray, FISS_BANK: nd
 
     # Sample scattering
     sample_isotropic(P)
+
+    # Branchless Collision: Update outgoing weight
+    if BRANCHLESS_POP_CTRL:
+        P['wgt'] = bc_calc_outgoing_wgt(P)
+
+    # Execute roulette if needed
+    if RUSSIAN_ROULETTE and (P['wgt'] < ROULETTE_WGT_THRESHOLD or P['wgt'] > ROULETTE_WGT_SURVIVE):
+        roulette(P, SECONDARY_BANK, ESTIMATOR)
+
+
+@njit
+def roulette(P: ndarray, SECONDARY_BANK: ndarray, ESTIMATOR: ndarray) -> None:
+
+    # Determine to split or to roulette
+    IS_ROULETTE = P['wgt'] < ROULETTE_WGT_THRESHOLD
+
+    # Case 1: Execute roulette
+    if IS_ROULETTE:
+        IS_KILLED = lcg(P) < (1 - P['wgt'] / ROULETTE_WGT_SURVIVE)
+        if IS_KILLED:
+            P['wgt'] = 0.0
+            return
+
+        # Survive
+        P['wgt'] = ROULETTE_WGT_SURVIVE
+        return
+
+    # Case 2: Split particle
+    N_SPLIT = int(P['wgt'] / ROULETTE_WGT_SURVIVE)
+    P['wgt'] /= (N_SPLIT+1)
+
+    # Add remainder to secondary bank
+    for idx in range(N_SPLIT):
+        idx = int(P['n_secondary']) + idx
+        SECONDARY_BANK[idx] = P
+
+    # Update number of particles in secondary bank
+    P['n_secondary'] += N_SPLIT
+    return
