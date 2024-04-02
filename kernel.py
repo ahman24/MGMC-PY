@@ -1,7 +1,6 @@
 from input import NU_XSF, XS_A, XS_T
 from input import N_INACTIVE, N_PARTICLE
-from input import PLANES
-from input import CONVERGENCE_METRIC, SE_NX, SE_NY, BIN_X, BIN_Y, BIN_Z
+from input import CONVERGENCE_METRIC, SE_NX, SE_NY, SE_NZ, BIN_X, BIN_Y, BIN_Z
 from datatype import PARTICLE_TYPE
 from prng import lcg, skip_ahead
 
@@ -17,36 +16,43 @@ from numpy import ndarray
 # =============================================================================
 PI_DOUBLE = nb.float64(2.0*math.pi)
 
-SRC_BANK = np.zeros(N_PARTICLE, dtype=PARTICLE_TYPE)
-FISS_BANK = np.zeros(3*N_PARTICLE, dtype=PARTICLE_TYPE)
-
 
 # =============================================================================
 # SIMULATION
 # =============================================================================
 
+@njit
+def init_generation(FISS_BANK: ndarray, ESTIMATOR: ndarray):
+
+    # Reset fission bank and index
+    IDX = int(ESTIMATOR['IDX_FISS_BANK'])
+    FISS_BANK[:IDX] = np.zeros(IDX, dtype=PARTICLE_TYPE)
+    ESTIMATOR['IDX_FISS_BANK'] = 0.0
+
+    # Reset keff generation-wise running-sum
+    ESTIMATOR['KEFF_TL_SUM'] = 0.0
+
 
 @njit
-def generation_closeout(idx_gen: int, ESTIMATOR: ndarray, METRIC_SE, METRIC_SE_MESH, METRIC_COM) -> list[float]:
+def generation_closeout(idx_gen: int, SRC_BANK: ndarray, FISS_BANK: ndarray, ESTIMATOR: ndarray, METRIC_SE: ndarray, METRIC_COM: ndarray) -> list[float]:
 
     # Update current generation keff
     ESTIMATOR['KEFF_CURRENT'] = ESTIMATOR['KEFF_TL_SUM'] / N_PARTICLE
 
     # Calculate convergence metrics
     if CONVERGENCE_METRIC:
-        calculate_convergence_metrics(
-            idx_gen, int(ESTIMATOR['IDX_FISS_BANK']),
-            METRIC_SE, METRIC_SE_MESH,
-            METRIC_COM)
+        IDX_FISS_BANK = int(ESTIMATOR['IDX_FISS_BANK'])
+        SE, COM_X, COM_Y, COM_Z = calculate_convergence_metrics(
+            FISS_BANK[:IDX_FISS_BANK])
+        METRIC_SE[idx_gen] = SE
+        METRIC_COM[idx_gen, 0] = COM_X
+        METRIC_COM[idx_gen, 1] = COM_Y
+        METRIC_COM[idx_gen, 2] = COM_Z
 
     # Perform UFS
 
     # Synchronize particle banks
-    global SRC_BANK
-    sync_bank(SRC_BANK, ESTIMATOR)
-
-    # Reset keff-generation accumulator
-    ESTIMATOR['KEFF_TL_SUM'] = 0.0
+    sync_bank(SRC_BANK, FISS_BANK, ESTIMATOR)
 
     # Inactive generation: Report current generation keff
     CURRENT_GEN = idx_gen + 1
@@ -75,7 +81,7 @@ def report(KEFF, STD, SE, COM) -> None:
 
 
 @njit
-def sync_bank(SRC_BANK: ndarray, ESTIMATOR: ndarray):
+def sync_bank(SRC_BANK: ndarray, FISS_BANK: ndarray, ESTIMATOR: ndarray):
 
     # Convert into integer
     IDX_FISS_BANK = int(ESTIMATOR['IDX_FISS_BANK'])
@@ -88,7 +94,7 @@ def sync_bank(SRC_BANK: ndarray, ESTIMATOR: ndarray):
     P_SAMPLE = SITES_NEEDED / IDX_FISS_BANK
 
     # Population control
-    TEMP_BANK = np.zeros(5*N_PARTICLE, dtype=PARTICLE_TYPE)
+    TEMP_BANK = np.zeros(3*N_PARTICLE, dtype=PARTICLE_TYPE)
     idx_temp = 0
     for P in FISS_BANK[:IDX_FISS_BANK]:
 
@@ -112,46 +118,38 @@ def sync_bank(SRC_BANK: ndarray, ESTIMATOR: ndarray):
             idx_temp += 1
 
     # Now copy the temp bank to new source bank
-    SRC_BANK = TEMP_BANK[:N_PARTICLE]
-
-    # Normalize the weight
-    # Cant do /= nor vectorized op
-    TOT_WGT = SRC_BANK['wgt'].sum()
+    RATIO = N_PARTICLE / TEMP_BANK[:N_PARTICLE]['wgt'].sum()
     for idx in range(N_PARTICLE):
-        SRC_BANK[idx]['wgt'] /= TOT_WGT
-    # SRC_BANK['wgt'] = np.divide(SRC_BANK['wgt'], TOT_WGT)
-
-    # Reset index for next generation
-    ESTIMATOR['IDX_FISS_BANK'] = 0
+        SRC_BANK[idx] = TEMP_BANK[idx]
+        SRC_BANK[idx]['wgt'] /= RATIO
 
 
 @njit
-def calculate_convergence_metrics(idx_gen: int, IDX_FISS_BANK: int, METRIC_SE: ndarray, METRIC_SE_MESH: ndarray, METRIC_COM: ndarray) -> None:
+def calculate_convergence_metrics(FISS_BANK: ndarray) -> list[float]:
 
     # Calculate idx corresponding to SE mesh
-    IDX_X = np.searchsorted(BIN_X, FISS_BANK[:IDX_FISS_BANK]['x'])
-    IDX_Y = np.searchsorted(BIN_Y, FISS_BANK[:IDX_FISS_BANK]['y'])
-    IDX_Z = np.searchsorted(BIN_Z, FISS_BANK[:IDX_FISS_BANK]['z'])
-    IDX = IDX_X + SE_NX*(IDX_Y-1) + (SE_NX*SE_NY) * (IDX_Z-1)
+    IDX_X = np.searchsorted(BIN_X, FISS_BANK['x'])
+    IDX_Y = np.searchsorted(BIN_Y, FISS_BANK['y'])
+    IDX_Z = np.searchsorted(BIN_Z, FISS_BANK['z'])
+    IDX = IDX_X-1 + SE_NX*(IDX_Y-1) + (SE_NX*SE_NY) * (IDX_Z-1)
+
+    # Init SE mesh bin
+    METRIC_SE_MESH = np.zeros(SE_NX*SE_NY*SE_NZ)
 
     # Calculate SE
-    TOT_WGT = FISS_BANK[:IDX_FISS_BANK]['wgt'].sum()
+    TOT_WGT = FISS_BANK['wgt'].sum()
     for loc, P in zip(IDX, FISS_BANK[IDX]):
         METRIC_SE_MESH[int(loc)] += P['wgt'] / TOT_WGT
     NON_ZERO_ENTRY = METRIC_SE_MESH[METRIC_SE_MESH != 0.0]
     SE = -(NON_ZERO_ENTRY * np.log2(NON_ZERO_ENTRY)).sum()
-    METRIC_SE[idx_gen] = SE
-
-    # Reset SE mesh for next generation
-    METRIC_SE_MESH.fill(0)
 
     # Calculate CoM
-    METRIC_COM[idx_gen, 0] = (FISS_BANK[:IDX_FISS_BANK]['wgt'] *
-                              FISS_BANK[:IDX_FISS_BANK]['x']).mean()
-    METRIC_COM[idx_gen, 1] = (FISS_BANK[:IDX_FISS_BANK]['wgt'] *
-                              FISS_BANK[:IDX_FISS_BANK]['y']).mean()
-    METRIC_COM[idx_gen, 2] = (FISS_BANK[:IDX_FISS_BANK]['wgt'] *
-                              FISS_BANK[:IDX_FISS_BANK]['z']).mean()
+    COM_X = (FISS_BANK['wgt'] * FISS_BANK['x']).mean()
+    COM_Y = (FISS_BANK['wgt'] * FISS_BANK['y']).mean()
+    COM_Z = (FISS_BANK['wgt'] * FISS_BANK['z']).mean()
+
+    # Return values
+    return SE, COM_X, COM_Y, COM_Z
 
 
 # =============================================================================
@@ -207,7 +205,7 @@ def sample_isotropic(P: ndarray) -> None:
 
 
 @njit
-def init_particle(IDX_SRC: int, IDX_GEN: int) -> ndarray:
+def init_particle(IDX_SRC: int, IDX_GEN: int, SRC_BANK: ndarray) -> ndarray:
     """
     Note:
     We cant modify directly by doing
@@ -233,10 +231,8 @@ def init_particle(IDX_SRC: int, IDX_GEN: int) -> ndarray:
     P['z'] = SRC['z']
     sample_isotropic(P)
     P['wgt'] = SRC['wgt']
-    if P['wgt'] != 0:
-        return
-    P['wgt'] = 1
-
+    if IDX_GEN == 0:
+        P['wgt'] = 1.0
     return P
 
 
@@ -295,8 +291,8 @@ def move(P: ndarray, PLANES: list[float]) -> bool:
     return IS_REFLECTED
 
 
-# njit: crash wo warning
-def collision(P: ndarray, ESTIMATOR: ndarray):
+@njit
+def collision(P: ndarray, PLANES: list[float], ESTIMATOR: ndarray, FISS_BANK: ndarray):
 
     # Move particle
     IS_REFLECTED = move(P, PLANES)
