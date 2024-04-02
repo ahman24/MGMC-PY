@@ -1,6 +1,7 @@
 from input import NU_XSF, XS_A, XS_S, XS_T
 from input import N_INACTIVE, N_PARTICLE
-from input import CONVERGENCE_METRIC, SE_NX, SE_NY, BIN_X, BIN_Y, BIN_Z
+from input import SE_NX, SE_NY, SE_BIN_X, SE_BIN_Y, SE_BIN_Z
+from input import UFS_CONVENTIONAL, UFS_VOL_FRAC, UFS_NX, UFS_NY, UFS_NZ, UFS_BIN_X, UFS_BIN_Y, UFS_BIN_Z
 from input import RUSSIAN_ROULETTE, ROULETTE_WGT_THRESHOLD, ROULETTE_WGT_SURVIVE
 from input import BRANCHLESS_POP_CTRL
 from datatype import PARTICLE_TYPE
@@ -24,7 +25,7 @@ PI_DOUBLE = nb.float64(2.0*math.pi)
 # =============================================================================
 
 @njit
-def init_generation(FISS_BANK: ndarray, ESTIMATOR: ndarray, METRIC_SE_MESH: ndarray):
+def init_generation(IDX_GEN: int, SRC_BANK: ndarray, FISS_BANK: ndarray, ESTIMATOR: ndarray, METRIC_SE_MESH: ndarray, UFS_MESH: ndarray):
 
     # Reset fission bank and index
     IDX = int(ESTIMATOR['IDX_FISS_BANK'])
@@ -37,6 +38,19 @@ def init_generation(FISS_BANK: ndarray, ESTIMATOR: ndarray, METRIC_SE_MESH: ndar
     # Reset SE mesh src_frac of previous generation
     METRIC_SE_MESH.fill(0.0)
 
+    # Calculate the source fraction in system
+    if UFS_CONVENTIONAL and IDX_GEN != 0:
+        UFS_MESH.fill(0.0)
+        IDX_X = np.searchsorted(UFS_BIN_X, SRC_BANK['x'])
+        IDX_Y = np.searchsorted(UFS_BIN_Y, SRC_BANK['y'])
+        IDX_Z = np.searchsorted(UFS_BIN_Z, SRC_BANK['z'])
+        IDX = IDX_X-1 + UFS_NX*(IDX_Y-1) + (UFS_NX*UFS_NY) * (IDX_Z-1)
+        for loc, P in zip(IDX, SRC_BANK):
+            UFS_MESH[loc] += P['wgt'] / N_PARTICLE
+    elif UFS_CONVENTIONAL and IDX_GEN == 0:
+        UNIFORM = 1 / (UFS_NX * UFS_NY * UFS_NZ)
+        UFS_MESH.fill(UNIFORM)
+
 
 @njit
 def generation_closeout(idx_gen: int, SRC_BANK: ndarray, FISS_BANK: ndarray, ESTIMATOR: ndarray, METRIC_SE: ndarray, METRIC_SE_MESH: ndarray, METRIC_COM: ndarray) -> list[float]:
@@ -45,10 +59,9 @@ def generation_closeout(idx_gen: int, SRC_BANK: ndarray, FISS_BANK: ndarray, EST
     ESTIMATOR['KEFF_CURRENT'] = ESTIMATOR['KEFF_TL_SUM'] / N_PARTICLE
 
     # Calculate convergence metrics
-    if CONVERGENCE_METRIC:
-        IDX_FISS_BANK = int(ESTIMATOR['IDX_FISS_BANK'])
-        calculate_convergence_metrics(idx_gen, FISS_BANK[:IDX_FISS_BANK],
-                                      METRIC_SE, METRIC_SE_MESH, METRIC_COM)
+    IDX_FISS_BANK = int(ESTIMATOR['IDX_FISS_BANK'])
+    calculate_convergence_metrics(idx_gen, FISS_BANK[:IDX_FISS_BANK],
+                                  METRIC_SE, METRIC_SE_MESH, METRIC_COM)
 
     # Perform UFS
 
@@ -131,9 +144,9 @@ def sync_bank(SRC_BANK: ndarray, FISS_BANK: ndarray, ESTIMATOR: ndarray):
 def calculate_convergence_metrics(IDX_GEN: int, FISS_BANK: ndarray, METRIC_SE: ndarray, METRIC_SE_MESH: ndarray, METRIC_COM: ndarray) -> list[float]:
 
     # Calculate idx corresponding to SE mesh
-    IDX_X = np.searchsorted(BIN_X, FISS_BANK['x'])
-    IDX_Y = np.searchsorted(BIN_Y, FISS_BANK['y'])
-    IDX_Z = np.searchsorted(BIN_Z, FISS_BANK['z'])
+    IDX_X = np.searchsorted(SE_BIN_X, FISS_BANK['x'])
+    IDX_Y = np.searchsorted(SE_BIN_Y, FISS_BANK['y'])
+    IDX_Z = np.searchsorted(SE_BIN_Z, FISS_BANK['z'])
     IDX = IDX_X-1 + SE_NX*(IDX_Y-1) + (SE_NX*SE_NY) * (IDX_Z-1)
 
     # Calculate SE
@@ -157,7 +170,12 @@ def calculate_convergence_metrics(IDX_GEN: int, FISS_BANK: ndarray, METRIC_SE: n
 # =============================================================================
 
 @njit
-def sample_fission(P, FISS_BANK, ESTIMATOR):
+def sample_fission(P: ndarray, FISS_BANK: ndarray, ESTIMATOR: ndarray, UFS_MESH: ndarray) -> None:
+
+    # Get UFS weight
+    UFS_WGT = 1.0
+    if UFS_CONVENTIONAL:
+        UFS_WGT = ufs_get_wgt(P, UFS_MESH)
 
     # Branchless: explicitly sample fission reaction
     BC_OUTGOING_WGT = 1.0
@@ -177,7 +195,7 @@ def sample_fission(P, FISS_BANK, ESTIMATOR):
 
     # Calculate expected num of fiss neutrons
     else:
-        NU_EXP = P['wgt'] / ESTIMATOR['KEFF_CURRENT'] * NU_XSF / XS_T
+        NU_EXP = P['wgt'] / ESTIMATOR['KEFF_CURRENT'] * UFS_WGT * NU_XSF / XS_T
 
         # Determine how many fission neutrons actually sampled
         N_SAMPLE = int(NU_EXP)
@@ -188,13 +206,21 @@ def sample_fission(P, FISS_BANK, ESTIMATOR):
         if N_SAMPLE == 0:
             return
 
+    # Handle population explosion in UFS or Branchless
+    SAMPLE_LIM = 4
+    if N_SAMPLE > SAMPLE_LIM:
+        RATIO = N_SAMPLE // SAMPLE_LIM + 1
+        NEW_N_SAMPLE = int(N_SAMPLE/RATIO)
+        UFS_WGT /= (N_SAMPLE / NEW_N_SAMPLE)
+        N_SAMPLE = NEW_N_SAMPLE
+
     # Sample fission neutrons
     for _ in range(N_SAMPLE):
         idx = int(ESTIMATOR['IDX_FISS_BANK'])
         FISS_BANK[idx]['x'] = P['x']
         FISS_BANK[idx]['y'] = P['y']
         FISS_BANK[idx]['z'] = P['z']
-        FISS_BANK[idx]['wgt'] = BC_OUTGOING_WGT
+        FISS_BANK[idx]['wgt'] = BC_OUTGOING_WGT / UFS_WGT
         ESTIMATOR['IDX_FISS_BANK'] += 1
 
 
@@ -209,15 +235,6 @@ def sample_absorption(P) -> None:
     if lcg(P)*XS_T < XS_A:
         P['wgt'] = 0.0
 
-
-@njit
-def bc_calc_prob_fission() -> float:
-    return NU_XSF / (NU_XSF + XS_S)
-
-
-@njit
-def bc_calc_outgoing_wgt(P) -> float:
-    return P['wgt'] * (NU_XSF + XS_S) / XS_T
 
 # =============================================================================
 # PARTICLE PHYSICS
@@ -267,8 +284,6 @@ def init_particle(IDX_SRC: int, IDX_GEN: int, SRC_BANK: ndarray, SECONDARY_BANK:
     P['z'] = SRC['z']
     sample_isotropic(P)
     P['wgt'] = SRC['wgt']
-    if IDX_GEN == 0:
-        P['wgt'] = 1.0
     return P
 
 
@@ -346,7 +361,7 @@ def move(P: ndarray, PLANES: list[float]) -> bool:
 
 
 @njit
-def collision(P: ndarray, PLANES: list[float], ESTIMATOR: ndarray, FISS_BANK: ndarray, SECONDARY_BANK: ndarray):
+def collision(P: ndarray, PLANES: list[float], ESTIMATOR: ndarray, FISS_BANK: ndarray, SECONDARY_BANK: ndarray, UFS_MESH: ndarray) -> None:
 
     # Move particle
     IS_REFLECTED = move(P, PLANES)
@@ -354,7 +369,7 @@ def collision(P: ndarray, PLANES: list[float], ESTIMATOR: ndarray, FISS_BANK: nd
         return
 
     # Sample fission neutrons implicitly
-    sample_fission(P, FISS_BANK, ESTIMATOR)
+    sample_fission(P, FISS_BANK, ESTIMATOR, UFS_MESH)
 
     # Sample absorption
     sample_absorption(P)
@@ -402,3 +417,40 @@ def roulette(P: ndarray, SECONDARY_BANK: ndarray, ESTIMATOR: ndarray) -> None:
     # Update number of particles in secondary bank
     P['n_secondary'] += N_SPLIT
     return
+
+# =============================================================================
+# VARIANCE REDUCTION TECHNIQUE
+# =============================================================================
+
+
+@njit
+def bc_calc_prob_fission() -> float:
+    return NU_XSF / (NU_XSF + XS_S)
+
+
+@njit
+def bc_calc_outgoing_wgt(P: ndarray) -> float:
+    return P['wgt'] * (NU_XSF + XS_S) / XS_T
+
+
+@njit
+def ufs_get_wgt(P: ndarray, UFS_MESH: ndarray) -> float:
+
+    # Get source frac
+    IDX_X = np.searchsorted(UFS_BIN_X, P['x'])
+    IDX_Y = np.searchsorted(UFS_BIN_Y, P['y'])
+    IDX_Z = np.searchsorted(UFS_BIN_Z, P['z'])
+    IDX = IDX_X-1 + UFS_NX*(IDX_Y-1) + (UFS_NX*UFS_NY) * (IDX_Z-1)
+    SRC_FRAC = UFS_MESH[IDX]
+
+    # Early returns
+    if SRC_FRAC == 0.0:
+        return 1.0
+
+    # Handle population explosion
+    # When src_frac is too low (non-zero), pop can explode
+    # Mitigate this by introducing a threshold.
+    VOL_TO_SRC = UFS_VOL_FRAC / SRC_FRAC
+    if VOL_TO_SRC <= 0.10:
+        VOL_TO_SRC = 1.0
+    return VOL_TO_SRC

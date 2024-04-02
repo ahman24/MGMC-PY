@@ -35,26 +35,26 @@ N_GENERATION = int(10_000)
 # SE configs are from Hunter Belanger, M&C 2023
 # =============================================================================
 
-CONVERGENCE_METRIC = True
 SE_NX, SE_NY, SE_NZ = 8, 8, 8
-BIN_X = np.linspace(PX_LHS, PX_RHS, SE_NX+1, endpoint=True)
-BIN_Y = np.linspace(PX_LHS, PX_RHS, SE_NX+1, endpoint=True)
-BIN_Z = np.linspace(PX_LHS, PX_RHS, SE_NX+1, endpoint=True)
-BIN_WIDTH_X = (PX_RHS - PX_LHS) / SE_NX
-BIN_WIDTH_Y = (PY_RHS - PY_LHS) / SE_NY
-BIN_WIDTH_Z = (PZ_RHS - PZ_LHS) / SE_NZ
+SE_BIN_X = np.linspace(PX_LHS, PX_RHS, SE_NX+1, endpoint=True)
+SE_BIN_Y = np.linspace(PY_LHS, PY_RHS, SE_NY+1, endpoint=True)
+SE_BIN_Z = np.linspace(PZ_LHS, PZ_RHS, SE_NZ+1, endpoint=True)
 
 
 # =============================================================================
 # Variance Reduction Technique
 # =============================================================================
 
-BRANCHLESS_POP_CTRL = True
+BRANCHLESS_POP_CTRL = False
 
-UFS = False
-UFS_NX, UFS_NY, UFS_NZ = 2, 2, 2
-UFS_BIN = np.zeros([UFS_NX*UFS_NY*UFS_NZ])
+# For now, UFS_NX = UFS_NY = UFS_NZ so vol_frac is constant for each bin
+UFS_CONVENTIONAL = True
+UFS_NX, UFS_NY, UFS_NZ = 4, 4, 4
+UFS_BIN_X = np.linspace(PX_LHS, PX_RHS, UFS_NX+1, endpoint=True)
+UFS_BIN_Y = np.linspace(PY_LHS, PY_RHS, UFS_NY+1, endpoint=True)
+UFS_BIN_Z = np.linspace(PZ_LHS, PZ_RHS, UFS_NZ+1, endpoint=True)
+UFS_VOL_FRAC = 1 / (UFS_NX * UFS_NY * UFS_NZ)
 
-RUSSIAN_ROULETTE = BRANCHLESS_POP_CTRL or UFS
+RUSSIAN_ROULETTE = BRANCHLESS_POP_CTRL or UFS_CONVENTIONAL
 ROULETTE_WGT_THRESHOLD = 0.25
 ROULETTE_WGT_SURVIVE = 1.0
