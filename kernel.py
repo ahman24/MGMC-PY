@@ -1,7 +1,8 @@
 from input import NU_XSF, XS_A, XS_S, XS_T
 from input import N_INACTIVE, N_PARTICLE
 from input import SE_NX, SE_NY, SE_BIN_X, SE_BIN_Y, SE_BIN_Z
-from input import UFS_CONVENTIONAL, UFS_VOL_FRAC, UFS_NX, UFS_NY, UFS_NZ, UFS_BIN_X, UFS_BIN_Y, UFS_BIN_Z
+from input import UFS_CONVENTIONAL, UFS_MODIFIED, UFS_THRESHOLD, UFS_VOL_FRAC
+from input import UFS_NX, UFS_NY, UFS_NZ, UFS_BIN_X, UFS_BIN_Y, UFS_BIN_Z
 from input import RUSSIAN_ROULETTE, ROULETTE_WGT_THRESHOLD, ROULETTE_WGT_SURVIVE
 from input import BRANCHLESS_POP_CTRL
 from datatype import PARTICLE_TYPE
@@ -39,37 +40,30 @@ def init_generation(IDX_GEN: int, SRC_BANK: ndarray, FISS_BANK: ndarray, ESTIMAT
     METRIC_SE_MESH.fill(0.0)
 
     # Calculate the source fraction in system
-    if UFS_CONVENTIONAL and IDX_GEN != 0:
-        UFS_MESH.fill(0.0)
-        IDX_X = np.searchsorted(UFS_BIN_X, SRC_BANK['x'])
-        IDX_Y = np.searchsorted(UFS_BIN_Y, SRC_BANK['y'])
-        IDX_Z = np.searchsorted(UFS_BIN_Z, SRC_BANK['z'])
-        IDX = IDX_X-1 + UFS_NX*(IDX_Y-1) + (UFS_NX*UFS_NY) * (IDX_Z-1)
-        for loc, P in zip(IDX, SRC_BANK):
-            UFS_MESH[loc] += P['wgt'] / N_PARTICLE
-    elif UFS_CONVENTIONAL and IDX_GEN == 0:
-        UNIFORM = 1 / (UFS_NX * UFS_NY * UFS_NZ)
-        UFS_MESH.fill(UNIFORM)
+    if UFS_CONVENTIONAL:
+        ufs_calc_src_frac(IDX_GEN, SRC_BANK, UFS_MESH)
 
 
 @njit
-def generation_closeout(idx_gen: int, SRC_BANK: ndarray, FISS_BANK: ndarray, ESTIMATOR: ndarray, METRIC_SE: ndarray, METRIC_SE_MESH: ndarray, METRIC_COM: ndarray) -> list[float]:
+def generation_closeout(IDX_GEN: int, SRC_BANK: ndarray, FISS_BANK: ndarray, ESTIMATOR: ndarray, METRIC_SE: ndarray, METRIC_SE_MESH: ndarray, METRIC_COM: ndarray, UFS_MESH: ndarray) -> list[float]:
 
     # Update current generation keff
     ESTIMATOR['KEFF_CURRENT'] = ESTIMATOR['KEFF_TL_SUM'] / N_PARTICLE
 
     # Calculate convergence metrics
     IDX_FISS_BANK = int(ESTIMATOR['IDX_FISS_BANK'])
-    calculate_convergence_metrics(idx_gen, FISS_BANK[:IDX_FISS_BANK],
+    calculate_convergence_metrics(IDX_GEN, FISS_BANK[:IDX_FISS_BANK],
                                   METRIC_SE, METRIC_SE_MESH, METRIC_COM)
 
-    # Perform UFS
+    # Perform UFS modified
+    if UFS_MODIFIED:
+        ufs_modified(IDX_GEN, FISS_BANK, UFS_MESH, ESTIMATOR)
 
     # Synchronize particle banks
     sync_bank(SRC_BANK, FISS_BANK, ESTIMATOR)
 
     # Inactive generation: Report current generation keff
-    CURRENT_GEN = idx_gen + 1
+    CURRENT_GEN = IDX_GEN + 1
     IS_INACTIVE = CURRENT_GEN <= N_INACTIVE
     if IS_INACTIVE:
         return ESTIMATOR['KEFF_CURRENT'], 0.0
@@ -385,11 +379,11 @@ def collision(P: ndarray, PLANES: list[float], ESTIMATOR: ndarray, FISS_BANK: nd
 
     # Execute roulette if needed
     if RUSSIAN_ROULETTE and (P['wgt'] < ROULETTE_WGT_THRESHOLD or P['wgt'] > ROULETTE_WGT_SURVIVE):
-        roulette(P, SECONDARY_BANK, ESTIMATOR)
+        roulette(P, SECONDARY_BANK)
 
 
 @njit
-def roulette(P: ndarray, SECONDARY_BANK: ndarray, ESTIMATOR: ndarray) -> None:
+def roulette(P: ndarray, SECONDARY_BANK: ndarray) -> None:
 
     # Determine to split or to roulette
     IS_ROULETTE = P['wgt'] < ROULETTE_WGT_THRESHOLD
@@ -434,6 +428,21 @@ def bc_calc_outgoing_wgt(P: ndarray) -> float:
 
 
 @njit
+def ufs_calc_src_frac(IDX_GEN: int, PARTICLE_BANK: ndarray, UFS_MESH: ndarray):
+    if IDX_GEN == 0 and not UFS_MODIFIED:
+        UNIFORM = 1 / (UFS_NX * UFS_NY * UFS_NZ)
+        UFS_MESH.fill(UNIFORM)
+    elif IDX_GEN != 0 or UFS_MODIFIED:
+        UFS_MESH.fill(0.0)
+        IDX_X = np.searchsorted(UFS_BIN_X, PARTICLE_BANK['x'])
+        IDX_Y = np.searchsorted(UFS_BIN_Y, PARTICLE_BANK['y'])
+        IDX_Z = np.searchsorted(UFS_BIN_Z, PARTICLE_BANK['z'])
+        IDX = IDX_X-1 + UFS_NX*(IDX_Y-1) + (UFS_NX*UFS_NY) * (IDX_Z-1)
+        for loc, P in zip(IDX, PARTICLE_BANK):
+            UFS_MESH[loc] += P['wgt'] / N_PARTICLE
+
+
+@njit
 def ufs_get_wgt(P: ndarray, UFS_MESH: ndarray) -> float:
 
     # Get source frac
@@ -451,6 +460,49 @@ def ufs_get_wgt(P: ndarray, UFS_MESH: ndarray) -> float:
     # When src_frac is too low (non-zero), pop can explode
     # Mitigate this by introducing a threshold.
     VOL_TO_SRC = UFS_VOL_FRAC / SRC_FRAC
-    if VOL_TO_SRC <= 0.10:
+    if VOL_TO_SRC <= UFS_THRESHOLD:
         VOL_TO_SRC = 1.0
     return VOL_TO_SRC
+
+
+@njit
+def ufs_modified(IDX_GEN: int, FISS_BANK: ndarray, UFS_MESH: ndarray, ESTIMATOR: ndarray) -> None:
+
+    # Update src frac with current fiss bank
+    ufs_calc_src_frac(IDX_GEN, FISS_BANK, UFS_MESH)
+
+    # Perform ufs modified
+    TEMP_BANK = np.zeros(5*N_PARTICLE, dtype=PARTICLE_TYPE)
+    IDX_FISS_BANK = int(ESTIMATOR['IDX_FISS_BANK'])
+    idx_temp = 0
+    for P in FISS_BANK[:IDX_FISS_BANK]:
+
+        # Calculate UFS_WGT based on current fisison bank
+        SPLIT_FACTOR = ufs_get_wgt(P, UFS_MESH)
+        if P['wgt'] / SPLIT_FACTOR < UFS_THRESHOLD:
+            RATIO = SPLIT_FACTOR * ROULETTE_WGT_THRESHOLD / P['wgt']
+            SPLIT_FACTOR /= RATIO
+
+        # Determine number of particles to split
+        N_SPLIT = int(SPLIT_FACTOR)
+        if random.random() <= (SPLIT_FACTOR - N_SPLIT):
+            N_SPLIT += 1
+        if N_SPLIT == 0:
+            continue
+
+        # Apply splitting
+        P['wgt'] /= SPLIT_FACTOR
+        for _ in range(N_SPLIT):
+            TEMP_BANK[idx_temp] = P
+            idx_temp += 1
+
+    # Clear and copy into the FISS_BANK
+    FISS_BANK[:IDX_FISS_BANK] = np.zeros(IDX_FISS_BANK, dtype=PARTICLE_TYPE)
+    for idx in range(idx_temp):
+        FISS_BANK[idx]['x'] = TEMP_BANK[idx]['x']
+        FISS_BANK[idx]['y'] = TEMP_BANK[idx]['y']
+        FISS_BANK[idx]['z'] = TEMP_BANK[idx]['z']
+        FISS_BANK[idx]['wgt'] = TEMP_BANK[idx]['wgt']
+
+    # Update fiss bank counter
+    ESTIMATOR['IDX_FISS_BANK'] = idx_temp

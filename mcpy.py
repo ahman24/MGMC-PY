@@ -73,7 +73,7 @@ def main():
 
         # Current generation completed: Calculate average keff
         KEFF, STD = kernel.generation_closeout(
-            idx_gen, SRC_BANK, FISS_BANK, ESTIMATOR, METRIC_SE, METRIC_SE_MESH, METRIC_COM)
+            idx_gen, SRC_BANK, FISS_BANK, ESTIMATOR, METRIC_SE, METRIC_SE_MESH, METRIC_COM, UFS_MESH)
 
         # Report keff
         kernel.report(KEFF, STD, METRIC_SE[idx_gen], METRIC_COM[idx_gen, :])
