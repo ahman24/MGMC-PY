@@ -8,10 +8,12 @@ import kernel
 from prng import set_seed
 
 import numpy as np
+from numpy import ndarray
+from numba import njit
 
 
 # =============================================================================
-# RUN SIMULATION
+# RUN
 # =============================================================================
 
 
@@ -50,26 +52,10 @@ def main():
         print(f"Gen {idx_gen+1} : ", end="")
         kernel.init_generation(idx_gen, SRC_BANK, FISS_BANK,
                                ESTIMATOR, METRIC_SE_MESH, UFS_MESH)
-        for idx_src in range(N_PARTICLE):
 
-            # Init particle
-            P = kernel.init_particle(
-                idx_src, idx_gen, SRC_BANK, SECONDARY_BANK)
-
-            # Begin random walks until terminated
-            while True:
-                kernel.collision(P, PLANES, ESTIMATOR,
-                                 FISS_BANK, SECONDARY_BANK,
-                                 UFS_MESH)
-
-                if P['wgt'] == 0.0:
-                    if P['n_secondary'] > 0:
-                        kernel.revive_from_secondary(P, SECONDARY_BANK)
-                        continue
-                    break
-
-            # Accumulate track-length estimator
-            ESTIMATOR['KEFF_TL_SUM'] += P['keff']
+        # Perform transport for sources of current generation
+        loop_source(idx_gen, PLANES, SRC_BANK, FISS_BANK, SECONDARY_BANK,
+                    ESTIMATOR, UFS_MESH)
 
         # Current generation completed: Calculate average keff
         KEFF, STD = kernel.generation_closeout(
@@ -77,6 +63,35 @@ def main():
 
         # Report keff
         kernel.report(KEFF, STD, METRIC_SE[idx_gen], METRIC_COM[idx_gen, :])
+
+
+# =============================================================================
+# SIMULATION
+# =============================================================================
+
+@njit
+def loop_source(IDX_GEN: int, PLANES: list[float], SRC_BANK: ndarray, FISS_BANK: ndarray, SECONDARY_BANK: ndarray, ESTIMATOR: ndarray, UFS_MESH: ndarray) -> None:
+    for idx_src in range(N_PARTICLE):
+        # Init particle
+        P = kernel.init_particle(
+            idx_src, IDX_GEN, SRC_BANK, SECONDARY_BANK)
+
+        # Begin random walks until terminated
+        while True:
+            kernel.collision(P, PLANES, ESTIMATOR,
+                             FISS_BANK, SECONDARY_BANK,
+                             UFS_MESH)
+
+            if P['wgt'] == 0.0:
+                if P['n_secondary'] > 0:
+                    kernel.revive_from_secondary(P, SECONDARY_BANK)
+                    continue
+                break
+
+            # Accumulate track-length estimator
+        ESTIMATOR['KEFF_TL_SUM'] += P['keff']
+
+
 
 
 if __name__ == "__main__":
