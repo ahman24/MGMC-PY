@@ -10,6 +10,7 @@ from prng import set_seed
 import numpy as np
 from numpy import ndarray
 from numba import njit
+import h5py
 
 
 # =============================================================================
@@ -64,6 +65,9 @@ def main():
         # Report keff
         kernel.report(KEFF, STD, METRIC_SE[idx_gen], METRIC_COM[idx_gen, :])
 
+    # Write output
+    write_output(KEFF, STD, METRIC_SE, METRIC_COM)
+
 
 # =============================================================================
 # SIMULATION
@@ -92,6 +96,15 @@ def loop_source(IDX_GEN: int, PLANES: list[float], SRC_BANK: ndarray, FISS_BANK:
         ESTIMATOR['KEFF_TL_SUM'] += P['keff']
 
 
+def write_output(KEFF: float, KEFF_STD: float, METRIC_SE: ndarray, METRIC_COM: ndarray) -> None:
+    with h5py.File("output.h5", "w") as f:
+
+        # Write keff
+        f.create_dataset("keff", data=[[KEFF, KEFF_STD]])
+
+        # Write convergence metrics
+        f.create_dataset("entropy", data=METRIC_SE)
+        f.create_dataset("com", data=METRIC_COM)
 
 
 if __name__ == "__main__":
